@@ -3,32 +3,24 @@ from datetime import datetime
 from typing import Tuple, List, Optional
 
 import pandas as pd
-import pandas_ta as ta
+import ta as ta_lib  # ✅ 換掉 pandas_ta，改用更穩定的 ta 套件
 import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title=“V12.3 Physical Audit Engine”)
-
-# ✅ CORS：allow_methods 加入 OPTIONS，修正 Safari preflight 問題
+app = FastAPI(title=“V12.4 Physical Audit Engine”)
 
 app.add_middleware(
 CORSMiddleware,
-allow_origins=[”*”],  # 正式部署後請改為你的前端網址
+allow_origins=[”*”],
 allow_methods=[“GET”, “OPTIONS”],
 allow_headers=[”*”],
 )
 
-# — 核心評分引擎 —
-
 def get_v12_score(
 info: dict,
-rsi: Optional[float]  # ✅ 修正：明確接受 None，不假設 rsi 一定有值
+rsi: Optional[float]
 ) -> Tuple[int, List[str], List[str]]:
-“””
-5 大區塊評分系統（滿分 125）
-所有 None 欄位顯式回報，拒絕靜默失敗。
-“””
 score = 0
 details = []
 warnings = []
@@ -37,8 +29,8 @@ warnings = []
 # A. EPS 獲利面（0~20）
 eps_raw = info.get('trailingEps')
 if eps_raw is None:
-    warnings.append("trailingEps 數據缺失，EPS 相關評分跳過")
-    eps = None  # ✅ 修正：缺失就是 None，不用 0 代替，避免觸發假警報
+    warnings.append("trailingEps 數據缺失，EPS 評分跳過")
+    eps = None
 else:
     eps = eps_raw
     if eps > 0:
@@ -85,10 +77,8 @@ else:
 
 # E. 技術動能面（-20~40）
 if rsi is None:
-    # ✅ 修正：RSI 缺失時整區跳過，不做任何加減分
     warnings.append("RSI 無法計算，技術動能評分跳過")
 elif rsi > 65:
-    # ✅ 修正：eps 為 None 時不觸發假警報，只在確認虧損時才減分
     if eps is not None and eps <= 0:
         score -= 20
         details.append(f"🔴 背離警告：高動能(RSI={rsi:.1f})伴隨虧損，疑似炒作 (-20)")
@@ -103,15 +93,10 @@ else:
 return min(max(score, 0), 125), details, warnings
 ```
 
-# — API 端點 —
-
-# ✅ 修正：改回同步 def，FastAPI 自動放入 thread pool，避免阻塞 event loop
-
 @app.get(”/audit/{symbol}”)
 def run_v12_audit(symbol: str):
 
 ```
-# 第一層：網路 / 連線錯誤 → 500
 try:
     ticker_str = f"{symbol.upper()}.TW"
     stock = yf.Ticker(ticker_str)
@@ -119,38 +104,37 @@ try:
 except Exception as e:
     raise HTTPException(status_code=500, detail=f"yfinance 連線失敗：{str(e)}")
 
-# 第二層：資料驗證錯誤 → 404 / 422
 if hist is None or hist.empty:
     raise HTTPException(status_code=404, detail=f"找不到代號 {symbol}，請確認是否為有效台股代號")
 
 if len(hist) < 20:
     raise HTTPException(status_code=422, detail=f"K 線資料不足（{len(hist)} 筆），至少需要 20 筆")
 
-# 第三層：計算 / 邏輯錯誤 → 500
 try:
     last_close = float(hist['Close'].iloc[-1])
 
-    # RSI
-    rsi_val = ta.rsi(hist['Close']).iloc[-1]
+    # ✅ 使用 ta 套件計算 RSI
+    rsi_series = ta_lib.momentum.RSIIndicator(hist['Close'], window=14).rsi()
+    rsi_val = rsi_series.iloc[-1]
     rsi: Optional[float] = None if pd.isna(rsi_val) else round(float(rsi_val), 1)
 
-    # ATR（含 fallback 旗標）
-    atr_val = ta.atr(hist['High'], hist['Low'], hist['Close']).iloc[-1]
+    # ✅ 使用 ta 套件計算 ATR
+    atr_series = ta_lib.volatility.AverageTrueRange(
+        hist['High'], hist['Low'], hist['Close'], window=14
+    ).average_true_range()
+    atr_val = atr_series.iloc[-1]
     atr_estimated = pd.isna(atr_val)
     atr = last_close * 0.03 if atr_estimated else float(atr_val)
 
-    # 基本面
     info = stock.info
     if not info or (
         info.get('regularMarketPrice') is None and
         info.get('currentPrice') is None
     ):
-        raise HTTPException(status_code=404, detail=f"無法取得 {symbol} 基本面資料，請確認代號")
+        raise HTTPException(status_code=404, detail=f"無法取得 {symbol} 基本面資料")
 
-    # 評分
     final_score, audit_details, warnings = get_v12_score(info, rsi)
 
-    # 座標
     s_coord = last_close - (atr * 1.5)
     w_coord = last_close + (atr * 2.0)
     book_value = info.get('bookValue')
@@ -187,47 +171,3 @@ except HTTPException:
 except Exception as e:
     raise HTTPException(status_code=500, detail=f"審計引擎內部錯誤：{str(e)}")
 ```
-
-# =============================================================
-
-# 部署指南（Render / Railway）
-
-# =============================================================
-
-# 1. requirements.txt：
-
-# fastapi
-
-# uvicorn
-
-# yfinance
-
-# pandas_ta
-
-# pandas
-
-# 
-
-# 2. 啟動指令：
-
-# uvicorn main:app –host 0.0.0.0 –port $PORT
-
-# 
-
-# 3. Fugle 即時價升級：
-
-# 在平台的 Environment Variables 設定 FUGLE_TOKEN=你的token
-
-# 程式內用 os.getenv(“FUGLE_TOKEN”) 取用
-
-# 絕對不要把 token 寫在程式碼裡
-
-# 
-
-# 4. 測試 API：
-
-# 部署後開啟 https://你的網址/docs
-
-# 即可看到自動產生的 Swagger 互動介面
-
-# =============================================================
