@@ -8,7 +8,8 @@ import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title=“V12.5 Physical Audit Engine”)
+app = FastAPI()
+
 
 app.add_middleware(
 CORSMiddleware,
