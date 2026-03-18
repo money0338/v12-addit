@@ -21,8 +21,6 @@ def get_v12_score(info, rsi):
 score = 0
 details = []
 warnings = []
-
-```
 eps_raw = info.get('trailingEps')
 if eps_raw is None:
     warnings.append("trailingEps missing")
